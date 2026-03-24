@@ -1,193 +1,382 @@
-# rtw-ollama-agent
+# Plan-and-Execute-Agent
 
-LangChain + Ollama + MCP で動くローカル Plan-and-Execute エージェント。
+Plan-and-Execute-Agent 是一个基于 LangChain、Ollama 与 MCP（Model Context Protocol）的本地智能体系统。项目以“尽量不依赖现成 Agent 框架”为设计原则，从零实现了任务规划、执行、失败恢复与重规划的完整闭环，用于验证本地大语言模型在工具调用与复杂任务执行场景下的工程可行性。
 
-「Reinventing The Wheel」の名の通り、既存のエージェントフレームワークをなるべく使わず、計画・実行・リプランのループを自前で実装しています。
-
----
-
-## 特徴
-
-- **完全ローカル実行** — Ollama によりモデルをローカルで動かします（デフォルト: `qwen2.5:7b`）
-- **Plan-and-Execute** — LLM がタスクを番号付きステップに分解してから逐次実行します
-- **自動リプラン** — ステップ失敗時や未完了ステップが残った場合に、完了済みを引き継ぎながら計画を立て直します
-- **ルーター** — 挨拶・雑談はキーワード判定で即 Chat パスへ、ツールが必要なタスクのみ Agent パスへ振り分けます
-- **Input Fixer** — 小型モデルが幻覚するツール名・引数名・エスケープ文字を自動修正してから呼び出します
-- **ガードレール** — Watchdog（繰り返し失敗検知）、言語ガード（日本語強制）、タイムアウト（`EXEC_TIMEOUT`）を備えます
-- **メトリクス** — TCA / ArgFit / StepCR を各セッション後に `metrics.jsonl` へ記録します
-- **MCP ツール** — 6種のツールサーバーをコンテナで起動します
-- **モジュール構造** — 責務ごとにファイルを分割し、純粋関数を中心に単体テストを整備しています
+本项目支持在本地运行大语言模型，将用户任务拆解为结构化步骤，按顺序调用外部工具完成执行，并在执行失败或中间状态不满足预期时自动进行重规划。系统同时提供输入修正、执行保护与指标记录机制，以提升整体稳定性、可解释性与可调试性。
 
 ---
 
-## アーキテクチャ
+## 目录
+
+- [项目简介](#项目简介)
+- [核心功能](#核心功能)
+- [系统架构](#系统架构)
+- [项目结构](#项目结构)
+- [执行流程](#执行流程)
+- [MCP 工具](#mcp-工具)
+- [保护机制](#保护机制)
+- [运行指标](#运行指标)
+- [环境要求](#环境要求)
+- [安装与启动](#安装与启动)
+- [使用方法](#使用方法)
+- [模型配置](#模型配置)
+- [测试](#测试)
+- [日志与结果](#日志与结果)
+- [项目定位](#项目定位)
+- [局限性](#局限性)
+
+---
+
+## 项目简介
+
+传统对话式大语言模型在面对多步骤任务时，往往只能生成建议或静态答案，而无法稳定完成“规划—调用工具—检查结果—继续执行”的闭环。Plan-and-Execute-Agent 的目标是构建一个可本地部署、可解释、可扩展的 Agent 执行系统，使模型不仅能“回答问题”，还能“完成任务”。
+
+该项目的核心特征包括：
+
+1. 本地运行  
+   基于 Ollama 管理和部署模型，默认使用 `qwen2.5:7b`，无需依赖外部闭源 API。
+
+2. 任务规划  
+   利用大语言模型将复杂任务拆解为编号步骤，并维护当前执行状态。
+
+3. 工具调用  
+   通过 MCP 统一接入文件系统、命令执行、网页搜索、SQLite、时间与记忆等工具。
+
+4. 自动重规划  
+   当某一步失败、结果异常或任务未完成时，系统根据当前状态重新生成后续计划。
+
+5. 稳定性增强  
+   通过工具名修正、参数修正、内容修正、Watchdog 与超时控制等机制，降低小模型调用工具时的错误率。
+
+---
+
+## 核心功能
+
+### 1. 完全本地执行
+
+系统基于 Ollama 在本地运行大语言模型，默认模型为 `qwen2.5:7b`。这种方式避免了对云端推理接口的依赖，适用于离线环境、隐私敏感场景及本地实验。
+
+### 2. Plan-and-Execute 任务执行范式
+
+系统首先将用户输入转换为结构化计划，再逐步执行各个步骤，而不是一次性生成最终答案。该范式更适合处理需要工具调用、状态追踪与多轮推理的复杂任务。
+
+### 3. 自动重规划
+
+当某一步骤失败、部分任务完成但整体未闭环，或已有执行结果与预期不一致时，系统会保留已完成状态，并对剩余任务进行重规划，以提高任务完成率。
+
+### 4. Router 路由机制
+
+系统通过快速意图分类，将普通问候、闲聊类输入直接路由到轻量聊天路径，而仅将需要工具调用和复杂推理的任务送入 Agent 执行路径，从而节约推理成本并提升响应效率。
+
+### 5. 输入修正机制
+
+为了缓解小模型在工具调用阶段常见的输出不稳定问题，系统提供以下自动修正能力：
+
+- Tool Name Fixer：修正错误工具名
+- Arg Fixer：修正参数名与参数结构
+- Content Fixer：修正内容格式与转义字符
+
+### 6. 保护机制
+
+系统内置 Watchdog、语言约束与超时控制等机制，用于避免重复失败、死循环、无效输出与长时间阻塞。
+
+### 7. 运行指标记录
+
+每轮任务执行结束后，系统会将关键指标记录到日志文件中，用于后续对比分析、模型评估与工程调优。
+
+---
+
+## 系统架构
+
+系统由路由、规划、执行循环、工具调用与重规划模块组成，整体执行链路如下：
+
+```text
+用户请求
+   ↓
+Router（意图分类）
+   ├── 普通对话 → Chat Path
+   └── Agent 任务 → Planner
+                      ↓
+               生成任务计划
+                      ↓
+                Exec Loop
+      ├── 工具名修正
+      ├── 参数修正
+      ├── 内容修正
+      ├── 工具调用
+      ├── 状态更新
+      └── Watchdog 检查
+                      ↓
+              是否完成任务？
+               ├── 是 → 输出结果
+               └── 否 → Replan
 
 ```
+
+## 核心模块关系如下：
+```text
 ┌─────────────────────────────────────────────────────────┐
 │ executor.py          run()                              │
-│   ├── _quick_classify() / classify_intent()  ← Router  │
+│   ├── _quick_classify() / classify_intent()            │
 │   ├── planner.py     make_plan()                        │
 │   │     └── gather_current_state()                      │
 │   └── exec_loop.py   run_exec_loop()                    │
-│         ├── _fix_tool_name()   ← Tool Name Fixer        │
-│         ├── _fix_args()        ← Arg Fixer              │
-│         ├── _fix_content()     ← Content Fixer          │
+│         ├── _fix_tool_name()                            │
+│         ├── _fix_args()                                 │
+│         ├── _fix_content()                              │
 │         ├── _invoke_tool()                              │
-│         ├── _build_watchdog_hint()  ← Watchdog          │
+│         ├── _build_watchdog_hint()                      │
 │         └── planner.py  _apply_replan()                 │
 └─────────────────────────────────────────────────────────┘
 ```
-
-### ファイル構成
-
+## 项目结构
+```text
+Plan-and-Execute-Agent/
+├── app/
+│   ├── main.py                 # 命令行入口
+│   ├── executor.py             # Router、Planner、Exec Loop 的总调度
+│   ├── exec_loop.py            # 执行循环、工具调用、状态更新、Watchdog
+│   ├── planner.py              # 任务规划、状态收集、重规划
+│   ├── models.py               # Step 数据结构及相关解析逻辑
+│   ├── prompts.py              # 各阶段 Prompt 模板
+│   ├── utils.py                # 日志、指标记录与工具函数
+│   ├── config.py               # 全局配置项
+│   ├── llm.py                  # Ollama 客户端与模型配置
+│   ├── servers/                # MCP 服务配置
+│   └── tests/                  # 单元测试
+├── docs/                       # 项目文档
+├── mcp/                        # MCP 服务相关资源
+├── scripts/                    # 启动、测试与辅助脚本
+├── docker-compose.yml          # 默认容器编排配置
+├── docker-compose.gpu.yml      # GPU 环境配置
+└── README.md
 ```
-app/
-├── main.py          # エントリポイント (argparse + asyncio.run)
-├── executor.py      # Router → plan → exec の接続
-├── exec_loop.py     # 実行ループ + Input Fixer + Watchdog + メトリクス
-├── planner.py       # LLM による計画生成・リプラン・状態収集
-├── models.py        # Step dataclass / parse_steps / format_checklist
-├── prompts.py       # 各フェーズのプロンプトテンプレート
-├── utils.py         # MetricsLogger / setup_logging / ヘルパー関数
-├── config.py        # 定数 (MAX_STEPS, EXEC_TIMEOUT など)
-├── llm.py           # Ollama クライアント + モデル別設定
-├── servers/         # MCP サーバー設定
-└── tests/           # 単体テスト (pytest)
-```
+执行流程
 
----
+系统的典型执行流程如下：
 
-## MCP ツール
+1. 用户输入任务
 
-| ツール | 用途 |
-|---|---|
-| filesystem | ファイル読み書き (`/data/` 以下) |
-| shell | コマンド実行 (`/workspace`, `/data`) |
-| websearch | Web 検索 + ページ取得 |
-| time | 現在日時の取得 (JST) |
-| sqlite | SQLite DB 操作 (`/data/agent.db`) |
-| memory | キーバリュー形式のメモ永続化 |
+例如：
 
----
+创建并写入一个文件
+执行一段 Python 脚本
+查询当前时间
+使用 SQLite 创建表并插入数据
+搜索网页并总结结果
+2. 路由阶段
 
-## ガードレール
+系统首先判断该请求是否属于简单闲聊。如果是，则直接返回聊天结果；如果需要调用工具或多步骤规划，则进入 Agent 路径。
 
-| 機能 | 説明 |
-|---|---|
-| Tool Name Fixer | 幻覚ツール名をエイリアステーブル + difflib で修正 |
-| Arg Fixer | 誤った引数名（`cmd`→`command` 等）をスキーマに合わせて修正 |
-| Content Fixer | `write_file` の `\n` リテラルを実改行に変換（SyntaxError 防止） |
-| Watchdog | 同一ツールが 2 回以上失敗した場合、リプラン時にヒントを注入 |
-| Language Guard | SYSTEM_PROMPT で日本語出力を強制 |
-| EXEC_TIMEOUT | 実行ループ全体・各 LLM 呼び出しを `asyncio.wait_for` でカット（デフォルト 300 秒） |
+3. 规划阶段
 
----
+Planner 基于用户请求生成一组可执行步骤，并为后续执行维护任务状态。
 
-## メトリクス
+4. 执行阶段
 
-各セッション終了時に `/app/logs/metrics.jsonl` へ 1 行追記されます。
+Exec Loop 逐步执行每一个步骤，并在必要时：
 
-| 指標 | 説明 |
-|---|---|
-| TCA | Tool Calling Accuracy — ターン中にツールを呼んだ割合 |
-| ArgFit | 引数修正なしでスキーマに一致したツール呼び出しの割合 |
-| StepCR | Step Completion Rate — 全ステップ中に完了できた割合 |
+修正工具名
+修正参数
+修正内容格式
+调用对应 MCP 工具
+记录执行结果
+更新步骤状态
+5. 异常与恢复阶段
 
----
+当执行失败、重复失败或结果不满足预期时，Watchdog 会注入提示信息，系统据此对剩余步骤进行重规划。
 
-## セットアップ
+6. 输出阶段
 
-**前提:** Docker / Docker Compose がインストールされていること
+任务完成后，系统返回最终结果，并将关键执行指标写入日志。
 
-```bash
-git clone https://github.com/stanaka1110/rtw-ollama-agent.git
-cd rtw-ollama-agent
+MCP 工具
 
-# コンテナをビルド・起動 (初回は Ollama モデルのダウンロードに時間がかかります)
+系统通过 MCP 提供统一工具调用接口，当前支持以下工具：
+
+
+| 工具           | 用途           |
+| ------------ | ------------ |
+| `filesystem` | 文件读写操作       |
+| `shell`      | 执行命令行命令      |
+| `websearch`  | 网页搜索与页面抓取    |
+| `time`       | 获取当前时间       |
+| `sqlite`     | SQLite 数据库操作 |
+| `memory`     | 键值型记忆持久化     |
+
+
+这些工具共同构成 Agent 的“行动能力”，使模型可以与本地环境进行真实交互，而不仅仅停留在文本生成层面。
+
+保护机制
+
+为提升系统在本地小模型环境下的鲁棒性，项目设计了多层保护机制。
+
+1. Tool Name Fixer
+
+当模型生成错误的工具名称时，系统会基于别名映射或相似度匹配自动修正。
+
+2. Arg Fixer
+
+当模型输出的参数名与工具定义不一致时，系统尝试自动映射到正确字段，减少因参数格式不规范导致的执行失败。
+
+3. Content Fixer
+
+在涉及写文件、写脚本等场景时，系统会对换行、转义字符等内容进行修正，避免语法错误或格式损坏。
+
+4. Watchdog
+
+当某个工具连续失败或步骤长时间无进展时，Watchdog 会触发提示，辅助模型在重规划阶段规避重复错误。
+
+5. Language Guard
+
+系统支持对输出语言进行约束，保证项目在指定语言环境下输出一致。
+
+6. EXEC_TIMEOUT
+
+通过超时控制限制单次调用或整轮执行时间，避免死循环或长时间阻塞。
+
+运行指标
+
+系统在每次会话结束后，会将关键指标写入 metrics.jsonl，便于后续分析。
+
+指标	含义
+TCA	Tool Calling Accuracy，工具调用准确率
+ArgFit	参数与工具定义匹配的比例
+StepCR	Step Completion Rate，步骤完成率
+
+这些指标有助于评估不同模型、不同任务类型与不同 Prompt 配置下的执行质量。
+
+环境要求
+
+在开始之前，请确保本地环境满足以下条件：
+
+Docker
+Docker Compose
+Ollama
+Python 3.10 或以上版本（如需本地直接运行部分脚本）
+可选：GPU 环境（用于加速本地模型推理）
+安装与启动
+1. 克隆项目
+git clone https://github.com/SAYURIqvq/Plan-and-Execute-Agent.git
+cd Plan-and-Execute-Agent
+2. 启动服务
+
+首次启动时，系统会构建相关容器并拉取所需模型，耗时取决于网络与硬件环境。
+
 docker compose up -d
-```
 
-`ollama` サービスの `healthcheck` が通ればエージェントを使えます。
+如果使用 GPU 环境，可根据实际情况选择对应配置文件。
 
-```bash
+3. 检查服务状态
 docker compose ps
-```
 
----
+当 Ollama 服务健康检查通过后，即可开始使用系统。
 
-## 使い方
+使用方法
 
-プロジェクトルートの `agent` スクリプト経由で実行します。
+项目通过根目录下的脚本或命令行入口执行任务。示例：
 
-```bash
-chmod +x agent  # 初回のみ
+./agent "请告诉我当前时间"
+./agent "创建一个 ToDo 文件，并写入今天需要完成的三项任务"
+./agent "编写一个输出 hello world 的 Python 脚本并执行"
+./agent "在 SQLite 中创建 users 表并插入三条测试数据"
+./agent "搜索某个主题并总结关键信息"
 
-./agent "ToDoリストに「買い物」を追加して"
-./agent "現在時刻を教えて"
-./agent "hello world を出力する Python を書いて実行して"
-./agent "agent.db に users テーブルを作って3件のサンプルデータを挿入して"
-```
+如果你使用的是 Python 入口，也可以通过主程序直接执行：
 
----
+python app/main.py "请告诉我当前时间"
+模型配置
 
-## モデルの変更
+项目通过 docker-compose.yml 中的环境变量指定本地模型：
 
-`docker-compose.yml` の環境変数を変更します。
-
-```yaml
 environment:
-  - OLLAMA_MODEL=qwen2.5:7b  # 任意の Ollama モデル
-```
+  - OLLAMA_MODEL=qwen2.5:7b
 
-変更後は `docker compose up -d` で再起動します。
+修改后重新启动服务：
 
-### サポート済みモデル（`llm.py` に設定あり）
+docker compose up -d
 
-| モデル | サイズ | 特徴 |
-|---|---|---|
-| `qwen2.5:7b` | 7B | ベースライン（デフォルト） |
-| `qwen2.5:14b` | 14B | 汎用 |
-| `llama3.1:8b` | 8B | Meta 汎用 |
-| `llama3.2:3b` | 3B | 軽量 |
-| `mistral:7b` | 7B | 汎用 |
-| `gemma3:4b` | 4B | ノートPC 向け汎用 |
-| `gemma3:9b` | 9B | Google 汎用 |
-| `phi4` | 14B | STEM・論理推論 |
-| `lfm2.5-thinking` | 1.2B | 超軽量・推論特化 |
-| `qwen3:30b-a3b` | 30B(MoE) | 高効率フラグシップ |
-| `deepseek-r1:14b` | 14B | 蒸留版・推論特化 |
+当前已适配或验证过的模型包括：
 
-上記以外のモデルはデフォルト設定（`temperature=0.0, num_ctx=4096`）で動作します。
+模型	参数规模	说明
+qwen2.5:7b	7B	默认模型，综合性能基线
+qwen2.5:14b	14B	更强的通用能力
+llama3.1:8b	8B	Meta 通用模型
+llama3.2:3b	3B	轻量级模型
+mistral:7b	7B	通用推理模型
+gemma3:4b	4B	低资源环境适用
+gemma3:9b	9B	更高性能版本
+phi4	14B	适合 STEM 与逻辑推理
+lfm2.5-thinking	1.2B	超轻量推理模型
+qwen3:30b-a3b	30B（MoE）	高性能混合专家模型
+deepseek-r1:14b	14B	推理增强蒸馏模型
 
----
+对于未专门适配的模型，系统将使用默认参数运行。
 
-## テスト
+测试
+单元测试
 
-### 単体テスト
+项目提供基础单元测试用于验证核心执行逻辑：
 
-```bash
 docker exec langchain_app python -m pytest tests/ -v
-```
 
-| テストファイル | 対象 |
-|---|---|
-| `test_models.py` | `parse_steps` / `format_checklist` |
-| `test_utils.py` | `_sanitize` / `_task_message` / `_tool_descriptions` |
-| `test_planner.py` | `gather_current_state` / `_apply_replan` |
-| `test_exec_loop.py` | `_invoke_tool` / `_update_step` |
+典型测试覆盖如下模块：
 
-### モデル比較テスト
+测试文件	测试内容
+test_models.py	步骤解析与格式化逻辑
+test_utils.py	输入清洗、消息构造与工具描述
+test_planner.py	状态收集与重规划逻辑
+test_exec_loop.py	工具调用与步骤更新
+模型对比测试
 
-複数モデルを順番に実行して結果とメトリクスを比較します。
+项目支持多模型批量测试，用于比较不同本地模型在相同任务集上的表现：
 
-```bash
 ./test_models.sh
-```
 
-結果は `test_results/YYYYMMDD_HHMMSS/` 以下に保存されます。
+测试结果将保存在类似如下目录中：
 
-| ファイル | 内容 |
-|---|---|
-| `model_test_results.txt` | 各モデル・タスクの結果と所要時間 |
-| `metrics_snapshot.jsonl` | 今回分の生メトリクス |
-| `*_task*.stderr.log` | モデル/タスクごとの詳細ログ |
+test_results/YYYYMMDD_HHMMSS/
+日志与结果
+
+系统运行过程中会生成详细日志，用于排查问题与分析执行行为。
+
+文件	说明
+metrics.jsonl	每轮任务的指标记录
+*_task*.stderr.log	每个模型与任务的详细执行日志
+model_test_results.txt	模型批量测试结果
+metrics_snapshot.jsonl	某次测试的指标快照
+
+这些日志可以用于：
+
+分析工具调用失败原因
+评估模型在不同任务上的稳定性
+观察重规划触发频率
+比较不同模型与配置的执行效果
+项目定位
+
+本项目定位为一个本地 Agent 执行框架的工程实现，重点不在于训练新模型，而在于验证以下问题：
+
+本地 LLM 是否能够完成复杂任务规划与执行
+在不依赖闭源 API 的前提下，Agent 系统能否具备可用性
+如何通过工程机制弥补小模型在工具调用阶段的稳定性不足
+如何构建可解释、可调试、可扩展的本地智能体系统
+
+因此，本项目更适合作为以下方向的研究或工程基础：
+
+Agent 架构设计
+Plan-and-Execute 系统实现
+本地工具调用型智能体
+多步骤任务执行系统
+本地 LLM 应用验证平台
+局限性
+
+尽管该项目已经实现了完整的 Agent 执行链路，但仍存在以下局限：
+
+系统性能仍受限于本地模型能力
+小模型在复杂任务、长链推理与工具选择上仍可能出现不稳定现象。
+工具调用依赖 Prompt 与修正规则
+当前的稳定性提升部分依赖规则工程，尚未形成更通用的学习型纠错机制。
+不包含训练与对齐流程
+本项目关注 Agent 执行框架本身，不涉及模型微调、SFT 或 RLHF。
+工具生态仍可扩展
+当前支持的 MCP 工具数量有限，后续可继续扩展浏览器、数据库、知识库等能力。
