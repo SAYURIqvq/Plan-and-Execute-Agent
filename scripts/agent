@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+    echo "使い方: agent <プロンプト>" >&2
+    echo "例:    agent \"hello world を出力する Python を書いて実行して\"" >&2
+    exit 1
+fi
+
+exec docker exec langchain_app python main.py "$@"

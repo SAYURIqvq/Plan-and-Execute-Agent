@@ -1,0 +1,92 @@
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_MODEL=qwen2.5:7b
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull $$OLLAMA_MODEL
+        wait
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q $$OLLAMA_MODEL"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  mcp-filesystem:
+    build:
+      context: .
+      dockerfile: mcp/filesystem/Dockerfile
+    container_name: mcp-filesystem
+    user: "1000:1000"
+    volumes:
+      - ./workspace:/data
+
+  mcp-shell:
+    build:
+      context: .
+      dockerfile: mcp/shell/Dockerfile
+    container_name: mcp-shell
+    user: "1000:1000"
+    volumes:
+      - ./workspace:/workspace
+      - ./workspace:/data
+
+  mcp-tools:
+    build:
+      context: .
+      dockerfile: mcp/tools/Dockerfile
+    container_name: mcp-tools
+    user: "1000:1000"
+    environment:
+      - TZ=Asia/Tokyo
+    volumes:
+      - ./workspace:/data
+
+  mcp-websearch:
+    build:
+      context: .
+      dockerfile: mcp/websearch/Dockerfile
+    container_name: mcp-websearch
+    user: "1000:1000"
+
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: langchain_app
+    ports:
+      - "8000:8000"
+    user: "1000:1000"
+    group_add:
+      - "${DOCKER_GID}"  # docker group: access to /var/run/docker.sock
+    volumes:
+      - ./app:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5:7b
+      - TZ=Asia/Tokyo
+    depends_on:
+      ollama:
+        condition: service_healthy
+      mcp-filesystem:
+        condition: service_started
+      mcp-shell:
+        condition: service_started
+      mcp-websearch:
+        condition: service_started
+      mcp-tools:
+        condition: service_started
+
+volumes:
+  ollama_data:
