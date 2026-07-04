@@ -22,6 +22,7 @@ from config import (
     TOOL_RESULT_MAX_CHARS,
 )
 from core.models import Step
+from core.tool_errors import is_tool_error
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ async def _invoke_tool(tc: dict, tool_map: dict) -> tuple[str, bool]:
     try:
         result = await tool_map[tc["name"]].ainvoke(tc["args"])
         result_str = str(result)
-        is_error = "Error:" in result_str or "SQL error:" in result_str
+        is_error = is_tool_error(result_str)
     except ToolException as e:
         result_str = f"Tool error: {e}"
         is_error = True

@@ -1,0 +1,9 @@
+fastapi
+langchain
+langchain-core
+langchain-mcp-adapters
+langchain-ollama
+mcp
+pytest
+pytest-asyncio
+uvicorn[standard]

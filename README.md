@@ -177,6 +177,17 @@ Plan-and-Execute-Agent/
 docker exec langchain_app python -m pytest tests/ -v
 ```
 
+也可以在本地直接安装应用依赖并运行不依赖 Ollama/MCP 服务的确定性测试：
+
+```bash
+python -m pip install -r app/requirements.txt
+PYTHONPATH=app python -m pytest \
+  app/tests/test_models.py \
+  app/tests/test_utils.py \
+  app/tests/test_fixers.py \
+  app/tests/test_tool_errors.py
+```
+
 测试覆盖范围如下：
 
 | 测试文件 | 测试内容 |
@@ -185,6 +196,9 @@ docker exec langchain_app python -m pytest tests/ -v
 | `test_utils.py` | 输入清洗、消息构造与工具描述 |
 | `test_planner.py` | 状态收集与重规划机制 |
 | `test_exec_loop.py` | 工具调用与执行流程 |
+| `test_tool_errors.py` | MCP 工具返回结果的错误识别策略 |
+
+仓库已加入 GitHub Actions CI，用于在每次 push 和 pull request 上运行上述确定性测试，避免核心解析、修正和错误分类逻辑回退。
 
 ---
 
