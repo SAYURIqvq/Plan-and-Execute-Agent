@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate .env with host docker group GID
-echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
+# Resolve the repository even when invoked from another working directory.
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR"
+command -v docker >/dev/null || { echo "Docker is required" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "Start Docker before running this script" >&2; exit 1; }
+
+# Read the socket group inside the Linux daemon (also works with Docker Desktop).
+# Export only for this process; never overwrite the user's .env file.
+# Set DOCKER_GID explicitly to avoid this bootstrap container/pull.
+if [[ -z "${DOCKER_GID:-}" ]]; then
+    DOCKER_GID=$(docker run --rm --user 0 --entrypoint stat \
+        -v /var/run/docker.sock:/socket python:3.11-slim -c '%g' /socket)
+fi
+[[ "$DOCKER_GID" =~ ^[0-9]+$ ]] || { echo "DOCKER_GID must be numeric" >&2; exit 1; }
+export DOCKER_GID
+mkdir -p workspace
 
 # Try GPU first, fall back to CPU if nvidia runtime fails
 if docker info 2>/dev/null | grep -q "nvidia"; then

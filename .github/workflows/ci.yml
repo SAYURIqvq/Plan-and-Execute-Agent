@@ -19,7 +19,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: app/requirements.txt
+          cache-dependency-path: |
+            app/requirements.txt
+            app/constraints.txt
 
       - name: Install dependencies
         run: |
@@ -27,9 +29,4 @@ jobs:
           python -m pip install -r app/requirements.txt
 
       - name: Run deterministic tests
-        run: |
-          python -m pytest \
-            app/tests/test_models.py \
-            app/tests/test_utils.py \
-            app/tests/test_fixers.py \
-            app/tests/test_tool_errors.py
+        run: python -m pytest app/tests -q

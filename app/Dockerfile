@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y docker.io && rm -rf /var/lib/apt/lists/*
 
-COPY app/requirements.txt /tmp/requirements.txt
+COPY app/requirements.txt app/constraints.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY app/ .
