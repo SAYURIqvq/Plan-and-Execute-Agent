@@ -135,16 +135,15 @@ Router（意图分类）
 Plan-and-Execute-Agent/
 ├── app/
 │   ├── main.py                 # 命令行入口
-│   ├── executor.py             # Router、Planner、Exec Loop 的总调度
-│   ├── exec_loop.py            # 执行循环、工具调用、状态更新、Watchdog
-│   ├── planner.py              # 任务规划、状态收集、重规划
-│   ├── models.py               # Step 数据结构及相关解析逻辑
-│   ├── prompts.py              # 各阶段 Prompt 模板
-│   ├── utils.py                # 日志、指标记录与工具函数
-│   ├── config.py               # 全局配置项
-│   ├── llm.py                  # Ollama 客户端与模型配置
-│   ├── servers/                # MCP 服务配置
-│   └── tests/                  # 单元测试
+│   ├── agent/
+│   │   ├── executor.py         # 总调度
+│   │   ├── loops/              # Plan-and-Execute / ReAct 执行循环
+│   │   ├── components/         # 规划与执行辅助函数
+│   │   └── base/               # 修正、终止与 Watchdog 策略
+│   ├── core/                  # 模型、提示词、LLM 客户端、工具函数
+│   ├── config.py              # 配置
+│   ├── servers/               # MCP 服务配置
+│   └── tests/                 # 单元测试
 ├── docs/                       # 项目文档
 ├── mcp/                        # MCP 服务相关资源
 ├── scripts/                    # 启动、测试与辅助脚本
@@ -167,6 +166,21 @@ Plan-and-Execute-Agent/
 
 ---
 
+## 快速启动
+
+```bash
+git clone https://github.com/SAYURIqvq/Plan-and-Execute-Agent.git
+cd Plan-and-Execute-Agent
+bash scripts/start
+# 打开 http://localhost:8000
+```
+
+需要 Linux Docker Engine 或 macOS/Windows 的 Docker Desktop（Linux 容器）。首次启动会下载镜像和 Ollama 模型。启动脚本通过 Linux 容器读取 daemon socket 的组 ID，保留已有 `.env`；也可以显式设置 `DOCKER_GID=... bash scripts/start`。
+
+应用挂载 Docker socket 以启动 MCP 工具，这赋予其较高的 daemon 权限。请在专用本地开发环境中运行，不要将端口直接暴露给不可信用户。`workspace/` 需要对容器用户 UID 1000 可写；Linux 主机如遇权限错误，应调整该目录的属主/权限。
+
+依赖版本与验证范围见 [复现说明](docs/REPRODUCIBILITY.md)。
+
 ## 测试
 
 ### 单元测试
@@ -181,11 +195,7 @@ docker exec langchain_app python -m pytest tests/ -v
 
 ```bash
 python -m pip install -r app/requirements.txt
-PYTHONPATH=app python -m pytest \
-  app/tests/test_models.py \
-  app/tests/test_utils.py \
-  app/tests/test_fixers.py \
-  app/tests/test_tool_errors.py
+python -m pytest app/tests -q
 ```
 
 测试覆盖范围如下：
@@ -198,7 +208,7 @@ PYTHONPATH=app python -m pytest \
 | `test_exec_loop.py` | 工具调用与执行流程 |
 | `test_tool_errors.py` | MCP 工具返回结果的错误识别策略 |
 
-仓库已加入 GitHub Actions CI，用于在每次 push 和 pull request 上运行上述确定性测试，避免核心解析、修正和错误分类逻辑回退。
+仓库已加入 GitHub Actions CI，用于在每次 push 和 pull request 上运行全部 `app/tests/test_*.py` 确定性测试，避免核心解析、修正和错误分类逻辑回退。
 
 ---
 
@@ -207,13 +217,13 @@ PYTHONPATH=app python -m pytest \
 支持对多个模型进行批量测试，用于评估不同模型在相同任务上的表现：
 
 ```bash
-./test_models.sh
+bash scripts/bench.sh --tier quick --models qwen2.5:7b
 ```
 
 测试结果将保存至：
 
 ```text
-test_results/YYYYMMDD_HHMMSS/
+test_results/bench_YYYYMMDD_HHMMSS/
 ```
 
 ---
